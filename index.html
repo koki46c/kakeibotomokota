@@ -121,6 +121,32 @@
   .summary-box.kota .amount { color: #b83fd4; }
   .summary-box.total .amount { color: #333; }
 
+  /* 円グラフ切り替えタブ */
+  .pie-tabs {
+    display: flex; gap: 8px; margin-bottom: 16px;
+  }
+  .pie-tab {
+    flex: 1; padding: 8px; text-align: center; border-radius: 8px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    border: 2px solid #e8e8e8; background: white; color: #888;
+    transition: all 0.2s;
+  }
+  .pie-tab.active-all  { border-color: #555;   background: #555;   color: white; }
+  .pie-tab.active-tomo { border-color: #667eea; background: #667eea; color: white; }
+  .pie-tab.active-kota { border-color: #f093fb; background: #f093fb; color: white; }
+
+  /* 円グラフ凡例 */
+  .pie-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; }
+  .pie-legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; }
+  .pie-legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+  /* 棒グラフセクション */
+  .section-title {
+    font-size: 14px; font-weight: 600; color: #666;
+    margin: 20px 0 12px; padding-top: 16px;
+    border-top: 1px solid #f0f0f0;
+  }
+
   .category-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
   .category-tag {
     display: flex; align-items: center; gap: 6px; padding: 6px 12px;
@@ -149,6 +175,7 @@
   .toast.show { opacity: 1; }
 
   canvas { max-width: 100%; }
+  .pie-canvas-wrap { max-width: 280px; margin: 0 auto; }
   .month-select-row { display: flex; gap: 8px; margin-bottom: 16px; }
   .month-select-row select { flex: 1; padding: 10px; border: 2px solid #e8e8e8; border-radius: 8px; font-size: 14px; }
 </style>
@@ -271,7 +298,6 @@
         </select>
       </div>
       <div id="monthly-summary"></div>
-      <canvas id="monthly-chart" style="display:none"></canvas>
     </div>
   </div>
 
@@ -308,8 +334,18 @@
 let sb = null;
 let categories = [];
 let selectedPayer = 'とも';
-let monthlyChart = null;
+let monthlyBarChart = null;
+let monthlyPieChart = null;
 let yearlyChart = null;
+let currentPieMode = 'all'; // 'all' | 'tomo' | 'kota'
+let lastMonthlyData = [];   // 月別データをキャッシュして円グラフ切り替えに使う
+
+// カテゴリカラーパレット（最大16色）
+const PIE_COLORS = [
+  '#667eea','#f093fb','#43e97b','#fa709a','#4facfe',
+  '#f6d365','#a18cd1','#fda085','#84fab0','#f5576c',
+  '#30cfd0','#667eea','#ffecd2','#a1c4fd','#d4fc79','#96fbc4'
+];
 
 // ===== 接続 =====
 async function connect() {
@@ -326,7 +362,6 @@ async function connect() {
 
   try {
     sb = supabase.createClient(url, key);
-
     const { data, error } = await sb
       .from('categories')
       .select('id, name, created_at')
@@ -336,12 +371,10 @@ async function connect() {
 
     localStorage.setItem('sb_url', url);
     localStorage.setItem('sb_key', key);
-
     categories = data || [];
 
     document.getElementById('setup-screen').style.display = 'none';
     document.getElementById('main-screen').style.display = 'block';
-
     initApp();
   } catch (e) {
     errEl.textContent = '接続失敗: ' + (e.message || '接続情報を確認してください');
@@ -362,8 +395,7 @@ function initApp() {
     sel.innerHTML = '<option value="">年</option>';
     for (let y = currentYear; y >= currentYear - 5; y--) {
       const opt = document.createElement('option');
-      opt.value = y;
-      opt.textContent = y + '年';
+      opt.value = y; opt.textContent = y + '年';
       sel.appendChild(opt);
     }
     sel.value = currentYear;
@@ -375,7 +407,6 @@ function initApp() {
   renderCategorySelects();
   renderCategoryList();
 
-  // リアルタイム購読
   sb.channel('db-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'expenses' }, () => {
       const activeTab = document.querySelector('.tab.active');
@@ -404,15 +435,13 @@ async function reloadCategories() {
   }
 }
 
-// ===== カテゴリをセレクトに反映 =====
 function renderCategorySelects() {
   const sel = document.getElementById('input-category');
   const currentVal = sel.value;
   sel.innerHTML = '<option value="">カテゴリを選択</option>';
   categories.forEach(c => {
     const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = c.name;
+    opt.value = c.id; opt.textContent = c.name;
     sel.appendChild(opt);
   });
   if (currentVal) sel.value = currentVal;
@@ -422,14 +451,12 @@ function renderCategorySelects() {
   filterSel.innerHTML = '<option value="">全カテゴリ</option>';
   categories.forEach(c => {
     const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = c.name;
+    opt.value = c.id; opt.textContent = c.name;
     filterSel.appendChild(opt);
   });
   if (filterVal) filterSel.value = filterVal;
 }
 
-// ===== カテゴリ一覧を描画 =====
 function renderCategoryList() {
   const container = document.getElementById('category-list');
   if (categories.length === 0) {
@@ -439,27 +466,19 @@ function renderCategoryList() {
   container.innerHTML = categories.map(c => `
     <div class="category-tag">
       ${escHtml(c.name)}
-      <span class="del" onclick="deleteCategory('${c.id}', '${escHtml(c.name)}')" role="button" aria-label="${escHtml(c.name)}を削除">×</span>
+      <span class="del" onclick="deleteCategory('${c.id}','${escHtml(c.name)}')" role="button" aria-label="${escHtml(c.name)}を削除">×</span>
     </div>
   `).join('');
 }
 
-// ===== カテゴリ追加 =====
 async function addCategory() {
   const input = document.getElementById('new-category');
   const name = input.value.trim();
   if (!name) { showToast('カテゴリ名を入力してください'); return; }
   if (categories.some(c => c.name === name)) { showToast('同じ名前のカテゴリが既にあります'); return; }
 
-  const { data, error } = await sb
-    .from('categories')
-    .insert([{ name }])
-    .select('id, name, created_at');
-
-  if (error) {
-    showToast('追加失敗: ' + error.message);
-    return;
-  }
+  const { data, error } = await sb.from('categories').insert([{ name }]).select('id, name, created_at');
+  if (error) { showToast('追加失敗: ' + error.message); return; }
 
   input.value = '';
   if (data && data.length > 0) {
@@ -472,35 +491,22 @@ async function addCategory() {
   showToast('カテゴリを追加しました');
 }
 
-// ===== カテゴリ削除 =====
 async function deleteCategory(id, name) {
-  const { count } = await sb
-    .from('expenses')
-    .select('id', { count: 'exact', head: true })
-    .eq('category_id', id);
-
-  if (count > 0) {
-    showToast(`「${name}」は使用中のため削除できません`);
-    return;
-  }
-
+  const { count } = await sb.from('expenses').select('id', { count: 'exact', head: true }).eq('category_id', id);
+  if (count > 0) { showToast(`「${name}」は使用中のため削除できません`); return; }
   if (!confirm(`「${name}」を削除しますか？`)) return;
-
   const { error } = await sb.from('categories').delete().eq('id', id);
   if (error) { showToast('削除失敗: ' + error.message); return; }
-
   await reloadCategories();
   showToast('カテゴリを削除しました');
 }
 
-// ===== 支払い者選択 =====
 function selectPayer(payer) {
   selectedPayer = payer;
   document.getElementById('btn-tomo').className = 'payer-btn' + (payer === 'とも' ? ' active-tomo' : '');
   document.getElementById('btn-kota').className = 'payer-btn' + (payer === 'こた' ? ' active-kota' : '');
 }
 
-// ===== 支出追加 =====
 async function addExpense() {
   const date = document.getElementById('input-date').value;
   const amount = parseInt(document.getElementById('input-amount').value);
@@ -511,16 +517,13 @@ async function addExpense() {
   if (!amount || amount <= 0) { showToast('金額を入力してください'); return; }
 
   const btn = document.getElementById('btn-add');
-  btn.disabled = true;
-  btn.textContent = '記録中...';
+  btn.disabled = true; btn.textContent = '記録中...';
 
   const { error } = await sb.from('expenses').insert([{
     date, amount, category_id, payer: selectedPayer, memo: memo || null
   }]);
 
-  btn.disabled = false;
-  btn.textContent = '記録する';
-
+  btn.disabled = false; btn.textContent = '記録する';
   if (error) { showToast('記録失敗: ' + error.message); return; }
 
   document.getElementById('input-amount').value = '';
@@ -528,14 +531,13 @@ async function addExpense() {
   showToast('記録しました！');
 }
 
-// ===== カテゴリ名を取得するヘルパー =====
 function getCategoryName(categoryId) {
   if (!categoryId) return '未分類';
   const cat = categories.find(c => c.id === categoryId);
   return cat ? cat.name : '未分類';
 }
 
-// ===== 一覧読み込み =====
+// ===== 一覧 =====
 async function loadList() {
   const year = document.getElementById('filter-year').value;
   const month = document.getElementById('filter-month').value;
@@ -545,17 +547,14 @@ async function loadList() {
   container.innerHTML = '<div class="loading">読み込み中...</div>';
 
   try {
-    let query = sb
-      .from('expenses')
+    let query = sb.from('expenses')
       .select('id, date, amount, payer, memo, category_id')
       .order('date', { ascending: false })
       .order('created_at', { ascending: false });
 
     if (year && month) {
       const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
-      query = query
-        .gte('date', `${year}-${month}-01`)
-        .lte('date', `${year}-${month}-${lastDay}`);
+      query = query.gte('date', `${year}-${month}-01`).lte('date', `${year}-${month}-${lastDay}`);
     } else if (year) {
       query = query.gte('date', `${year}-01-01`).lte('date', `${year}-12-31`);
     }
@@ -563,12 +562,8 @@ async function loadList() {
     if (categoryId) query = query.eq('category_id', categoryId);
 
     const { data, error } = await query;
-
     if (error) throw error;
-    if (!data || data.length === 0) {
-      container.innerHTML = '<div class="empty">データがありません</div>';
-      return;
-    }
+    if (!data || data.length === 0) { container.innerHTML = '<div class="empty">データがありません</div>'; return; }
 
     container.innerHTML = data.map(e => `
       <div class="expense-item">
@@ -589,7 +584,6 @@ async function loadList() {
   }
 }
 
-// ===== 支出削除 =====
 async function deleteExpense(id) {
   if (!confirm('この支出を削除しますか？')) return;
   const { error } = await sb.from('expenses').delete().eq('id', id);
@@ -603,95 +597,196 @@ async function loadMonthly() {
   const year = document.getElementById('monthly-year').value;
   const month = document.getElementById('monthly-month').value;
   const container = document.getElementById('monthly-summary');
-  if (!year || !month) {
-    container.innerHTML = '<div class="empty">年と月を選択してください</div>';
-    return;
-  }
+  if (!year || !month) { container.innerHTML = '<div class="empty">年と月を選択してください</div>'; return; }
 
   try {
     const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
-    const { data, error } = await sb
-      .from('expenses')
+    const { data, error } = await sb.from('expenses')
       .select('id, date, amount, payer, category_id')
       .gte('date', `${year}-${month}-01`)
       .lte('date', `${year}-${month}-${lastDay}`);
 
     if (error) throw error;
 
-    const rows = data || [];
-    const tomoTotal = rows.filter(e => e.payer === 'とも').reduce((s, e) => s + e.amount, 0);
-    const kotaTotal = rows.filter(e => e.payer === 'こた').reduce((s, e) => s + e.amount, 0);
-    const total = tomoTotal + kotaTotal;
-
-    const catMap = {};
-    rows.forEach(e => {
-      const name = getCategoryName(e.category_id);
-      if (!catMap[name]) catMap[name] = { tomo: 0, kota: 0 };
-      if (e.payer === 'とも') catMap[name].tomo += e.amount;
-      else catMap[name].kota += e.amount;
-    });
-
-    container.innerHTML = `
-      <div class="summary-grid">
-        <div class="summary-box tomo">
-          <div class="label">とも</div>
-          <div class="amount">¥${tomoTotal.toLocaleString()}</div>
-        </div>
-        <div class="summary-box kota">
-          <div class="label">こた</div>
-          <div class="amount">¥${kotaTotal.toLocaleString()}</div>
-        </div>
-        <div class="summary-box total">
-          <div class="label">合計</div>
-          <div class="amount">¥${total.toLocaleString()}</div>
-        </div>
-      </div>
-      <h2 style="font-size:14px;margin-bottom:12px;color:#666;">カテゴリ別内訳</h2>
-    `;
-
-    const catNames = Object.keys(catMap);
-    const canvas = document.getElementById('monthly-chart');
-    if (catNames.length > 0) {
-      canvas.style.display = 'block';
-      if (monthlyChart) monthlyChart.destroy();
-      monthlyChart = new Chart(canvas, {
-        type: 'bar',
-        data: {
-          labels: catNames,
-          datasets: [
-            { label: 'とも', data: catNames.map(n => catMap[n].tomo), backgroundColor: '#667eea' },
-            { label: 'こた', data: catNames.map(n => catMap[n].kota), backgroundColor: '#f093fb' }
-          ]
-        },
-        options: {
-          responsive: true,
-          plugins: { legend: { position: 'top' } },
-          scales: {
-            x: { stacked: true },
-            y: { stacked: true, ticks: { callback: v => '¥' + v.toLocaleString() } }
-          }
-        }
-      });
-    } else {
-      canvas.style.display = 'none';
-    }
+    lastMonthlyData = data || [];
+    currentPieMode = 'all';
+    renderMonthly(lastMonthlyData);
   } catch(e) {
     container.innerHTML = `<div class="error-msg">エラー: ${e.message}</div>`;
   }
+}
+
+function renderMonthly(rows) {
+  const container = document.getElementById('monthly-summary');
+
+  const tomoTotal = rows.filter(e => e.payer === 'とも').reduce((s, e) => s + e.amount, 0);
+  const kotaTotal = rows.filter(e => e.payer === 'こた').reduce((s, e) => s + e.amount, 0);
+  const total = tomoTotal + kotaTotal;
+
+  // カテゴリ別集計（全員・とも・こた）
+  const catMapAll = {}, catMapTomo = {}, catMapKota = {};
+  rows.forEach(e => {
+    const name = getCategoryName(e.category_id);
+    if (!catMapAll[name])  catMapAll[name]  = 0;
+    if (!catMapTomo[name]) catMapTomo[name] = 0;
+    if (!catMapKota[name]) catMapKota[name] = 0;
+    catMapAll[name] += e.amount;
+    if (e.payer === 'とも') catMapTomo[name] += e.amount;
+    else                    catMapKota[name] += e.amount;
+  });
+
+  container.innerHTML = `
+    <!-- 合計サマリー -->
+    <div class="summary-grid">
+      <div class="summary-box tomo">
+        <div class="label">とも</div>
+        <div class="amount">¥${tomoTotal.toLocaleString()}</div>
+      </div>
+      <div class="summary-box kota">
+        <div class="label">こた</div>
+        <div class="amount">¥${kotaTotal.toLocaleString()}</div>
+      </div>
+      <div class="summary-box total">
+        <div class="label">合計</div>
+        <div class="amount">¥${total.toLocaleString()}</div>
+      </div>
+    </div>
+
+    <!-- 円グラフセクション -->
+    <div class="section-title">🥧 カテゴリ別割合</div>
+    <div class="pie-tabs">
+      <button class="pie-tab active-all"  id="pie-tab-all"  onclick="switchPie('all')">合計</button>
+      <button class="pie-tab" id="pie-tab-tomo" onclick="switchPie('tomo')">とも</button>
+      <button class="pie-tab" id="pie-tab-kota" onclick="switchPie('kota')">こた</button>
+    </div>
+    <div class="pie-canvas-wrap">
+      <canvas id="monthly-pie"></canvas>
+    </div>
+    <div class="pie-legend" id="pie-legend"></div>
+
+    <!-- 棒グラフセクション -->
+    <div class="section-title">📊 カテゴリ別内訳（とも / こた）</div>
+    <canvas id="monthly-bar"></canvas>
+  `;
+
+  // 棒グラフ
+  const catNames = Object.keys(catMapAll);
+  if (monthlyBarChart) monthlyBarChart.destroy();
+  if (catNames.length > 0) {
+    monthlyBarChart = new Chart(document.getElementById('monthly-bar'), {
+      type: 'bar',
+      data: {
+        labels: catNames,
+        datasets: [
+          { label: 'とも', data: catNames.map(n => catMapTomo[n] || 0), backgroundColor: '#667eea' },
+          { label: 'こた', data: catNames.map(n => catMapKota[n] || 0), backgroundColor: '#f093fb' }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { stacked: true },
+          y: { stacked: true, ticks: { callback: v => '¥' + v.toLocaleString() } }
+        }
+      }
+    });
+  }
+
+  // 円グラフ（初期：合計）
+  drawPieChart(catMapAll, catMapTomo, catMapKota, 'all');
+}
+
+// ===== 円グラフ切り替え =====
+function switchPie(mode) {
+  currentPieMode = mode;
+  // ボタンのスタイル切り替え
+  ['all','tomo','kota'].forEach(m => {
+    const btn = document.getElementById('pie-tab-' + m);
+    btn.className = 'pie-tab' + (m === mode ? ' active-' + m : '');
+  });
+
+  // catMapを再計算
+  const catMapAll = {}, catMapTomo = {}, catMapKota = {};
+  lastMonthlyData.forEach(e => {
+    const name = getCategoryName(e.category_id);
+    if (!catMapAll[name])  catMapAll[name]  = 0;
+    if (!catMapTomo[name]) catMapTomo[name] = 0;
+    if (!catMapKota[name]) catMapKota[name] = 0;
+    catMapAll[name] += e.amount;
+    if (e.payer === 'とも') catMapTomo[name] += e.amount;
+    else                    catMapKota[name] += e.amount;
+  });
+
+  drawPieChart(catMapAll, catMapTomo, catMapKota, mode);
+}
+
+function drawPieChart(catMapAll, catMapTomo, catMapKota, mode) {
+  const map = mode === 'tomo' ? catMapTomo : mode === 'kota' ? catMapKota : catMapAll;
+  const entries = Object.entries(map).filter(([, v]) => v > 0);
+
+  if (monthlyPieChart) monthlyPieChart.destroy();
+
+  const canvas = document.getElementById('monthly-pie');
+  const legend = document.getElementById('pie-legend');
+  if (!canvas || !legend) return;
+
+  if (entries.length === 0) {
+    canvas.style.display = 'none';
+    legend.innerHTML = '<span style="color:#aaa;font-size:13px;">データがありません</span>';
+    return;
+  }
+
+  canvas.style.display = 'block';
+  const labels = entries.map(([k]) => k);
+  const values = entries.map(([, v]) => v);
+  const colors = labels.map((_, i) => PIE_COLORS[i % PIE_COLORS.length]);
+  const total  = values.reduce((a, b) => a + b, 0);
+
+  monthlyPieChart = new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderWidth: 2, borderColor: '#fff' }]
+    },
+    options: {
+      responsive: true,
+      cutout: '60%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const val = ctx.parsed;
+              const pct = ((val / total) * 100).toFixed(1);
+              return ` ¥${val.toLocaleString()} (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // カスタム凡例
+  legend.innerHTML = labels.map((label, i) => {
+    const pct = ((values[i] / total) * 100).toFixed(1);
+    return `
+      <div class="pie-legend-item">
+        <div class="pie-legend-dot" style="background:${colors[i]}"></div>
+        <span>${escHtml(label)} ${pct}%</span>
+      </div>
+    `;
+  }).join('');
 }
 
 // ===== 年別集計 =====
 async function loadYearly() {
   const year = document.getElementById('yearly-year').value;
   const container = document.getElementById('yearly-summary');
-  if (!year) {
-    container.innerHTML = '<div class="empty">年を選択してください</div>';
-    return;
-  }
+  if (!year) { container.innerHTML = '<div class="empty">年を選択してください</div>'; return; }
 
   try {
-    const { data, error } = await sb
-      .from('expenses')
+    const { data, error } = await sb.from('expenses')
       .select('date, amount, payer')
       .gte('date', `${year}-01-01`)
       .lte('date', `${year}-12-31`);
@@ -704,23 +799,14 @@ async function loadYearly() {
     const total = tomoTotal + kotaTotal;
 
     const months = Array.from({length: 12}, (_, i) => String(i + 1).padStart(2, '0'));
-    const tomoByMonth = months.map(m => rows.filter(e => e.payer === 'とも' && e.date.slice(5, 7) === m).reduce((s, e) => s + e.amount, 0));
-    const kotaByMonth = months.map(m => rows.filter(e => e.payer === 'こた' && e.date.slice(5, 7) === m).reduce((s, e) => s + e.amount, 0));
+    const tomoByMonth = months.map(m => rows.filter(e => e.payer === 'とも' && e.date.slice(5,7) === m).reduce((s,e) => s+e.amount, 0));
+    const kotaByMonth = months.map(m => rows.filter(e => e.payer === 'こた' && e.date.slice(5,7) === m).reduce((s,e) => s+e.amount, 0));
 
     container.innerHTML = `
       <div class="summary-grid">
-        <div class="summary-box tomo">
-          <div class="label">とも</div>
-          <div class="amount">¥${tomoTotal.toLocaleString()}</div>
-        </div>
-        <div class="summary-box kota">
-          <div class="label">こた</div>
-          <div class="amount">¥${kotaTotal.toLocaleString()}</div>
-        </div>
-        <div class="summary-box total">
-          <div class="label">合計</div>
-          <div class="amount">¥${total.toLocaleString()}</div>
-        </div>
+        <div class="summary-box tomo"><div class="label">とも</div><div class="amount">¥${tomoTotal.toLocaleString()}</div></div>
+        <div class="summary-box kota"><div class="label">こた</div><div class="amount">¥${kotaTotal.toLocaleString()}</div></div>
+        <div class="summary-box total"><div class="label">合計</div><div class="amount">¥${total.toLocaleString()}</div></div>
       </div>
       <h2 style="font-size:14px;margin-bottom:12px;color:#666;">月別推移</h2>
     `;
@@ -757,14 +843,12 @@ function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-' + name).style.display = 'block';
   el.classList.add('active');
-
   if (name === 'list') loadList();
   if (name === 'monthly') loadMonthly();
   if (name === 'yearly') loadYearly();
   if (name === 'category') reloadCategories();
 }
 
-// ===== トースト =====
 function showToast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -772,13 +856,11 @@ function showToast(msg) {
   setTimeout(() => t.classList.remove('show'), 2500);
 }
 
-// ===== HTMLエスケープ =====
 function escHtml(str) {
   if (!str) return '';
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ===== 起動時：保存済み接続情報があれば自動接続 =====
 window.addEventListener('load', async () => {
   const url = localStorage.getItem('sb_url');
   const key = localStorage.getItem('sb_key');
