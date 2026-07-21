@@ -122,9 +122,7 @@
   .summary-box.total .amount { color: #333; }
 
   /* 円グラフ切り替えタブ */
-  .pie-tabs {
-    display: flex; gap: 8px; margin-bottom: 16px;
-  }
+  .pie-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
   .pie-tab {
     flex: 1; padding: 8px; text-align: center; border-radius: 8px;
     font-size: 13px; font-weight: 600; cursor: pointer;
@@ -136,9 +134,17 @@
   .pie-tab.active-kota { border-color: #f093fb; background: #f093fb; color: white; }
 
   /* 円グラフ凡例 */
-  .pie-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; justify-content: center; }
-  .pie-legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; }
+  .pie-legend { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+  .pie-legend-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; background: #f8f8f8; border-radius: 8px;
+  }
+  .pie-legend-left { display: flex; align-items: center; gap: 8px; }
   .pie-legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .pie-legend-name { font-size: 13px; color: #444; }
+  .pie-legend-right { text-align: right; }
+  .pie-legend-amount { font-size: 14px; font-weight: 700; color: #333; }
+  .pie-legend-pct { font-size: 11px; color: #aaa; margin-top: 1px; }
 
   /* 棒グラフセクション */
   .section-title {
@@ -337,14 +343,13 @@ let selectedPayer = 'とも';
 let monthlyBarChart = null;
 let monthlyPieChart = null;
 let yearlyChart = null;
-let currentPieMode = 'all'; // 'all' | 'tomo' | 'kota'
-let lastMonthlyData = [];   // 月別データをキャッシュして円グラフ切り替えに使う
+let currentPieMode = 'all';
+let lastMonthlyData = [];
 
-// カテゴリカラーパレット（最大16色）
 const PIE_COLORS = [
   '#667eea','#f093fb','#43e97b','#fa709a','#4facfe',
   '#f6d365','#a18cd1','#fda085','#84fab0','#f5576c',
-  '#30cfd0','#667eea','#ffecd2','#a1c4fd','#d4fc79','#96fbc4'
+  '#30cfd0','#96fbc4','#ffecd2','#a1c4fd','#d4fc79','#fd9853'
 ];
 
 // ===== 接続 =====
@@ -422,7 +427,6 @@ function initApp() {
     .subscribe();
 }
 
-// ===== カテゴリ再読み込み =====
 async function reloadCategories() {
   const { data, error } = await sb
     .from('categories')
@@ -623,7 +627,6 @@ function renderMonthly(rows) {
   const kotaTotal = rows.filter(e => e.payer === 'こた').reduce((s, e) => s + e.amount, 0);
   const total = tomoTotal + kotaTotal;
 
-  // カテゴリ別集計（全員・とも・こた）
   const catMapAll = {}, catMapTomo = {}, catMapKota = {};
   rows.forEach(e => {
     const name = getCategoryName(e.category_id);
@@ -636,7 +639,6 @@ function renderMonthly(rows) {
   });
 
   container.innerHTML = `
-    <!-- 合計サマリー -->
     <div class="summary-grid">
       <div class="summary-box tomo">
         <div class="label">とも</div>
@@ -652,7 +654,6 @@ function renderMonthly(rows) {
       </div>
     </div>
 
-    <!-- 円グラフセクション -->
     <div class="section-title">🥧 カテゴリ別割合</div>
     <div class="pie-tabs">
       <button class="pie-tab active-all"  id="pie-tab-all"  onclick="switchPie('all')">合計</button>
@@ -664,7 +665,6 @@ function renderMonthly(rows) {
     </div>
     <div class="pie-legend" id="pie-legend"></div>
 
-    <!-- 棒グラフセクション -->
     <div class="section-title">📊 カテゴリ別内訳（とも / こた）</div>
     <canvas id="monthly-bar"></canvas>
   `;
@@ -693,20 +693,17 @@ function renderMonthly(rows) {
     });
   }
 
-  // 円グラフ（初期：合計）
   drawPieChart(catMapAll, catMapTomo, catMapKota, 'all');
 }
 
 // ===== 円グラフ切り替え =====
 function switchPie(mode) {
   currentPieMode = mode;
-  // ボタンのスタイル切り替え
   ['all','tomo','kota'].forEach(m => {
     const btn = document.getElementById('pie-tab-' + m);
     btn.className = 'pie-tab' + (m === mode ? ' active-' + m : '');
   });
 
-  // catMapを再計算
   const catMapAll = {}, catMapTomo = {}, catMapKota = {};
   lastMonthlyData.forEach(e => {
     const name = getCategoryName(e.category_id);
@@ -767,13 +764,23 @@ function drawPieChart(catMapAll, catMapTomo, catMapKota, mode) {
     }
   });
 
-  // カスタム凡例
-  legend.innerHTML = labels.map((label, i) => {
-    const pct = ((values[i] / total) * 100).toFixed(1);
+  // ★ 凡例：カテゴリ名 + 金額（金額の大きい順に並べる）
+  const sorted = labels
+    .map((label, i) => ({ label, value: values[i], color: colors[i] }))
+    .sort((a, b) => b.value - a.value);
+
+  legend.innerHTML = sorted.map(item => {
+    const pct = ((item.value / total) * 100).toFixed(1);
     return `
       <div class="pie-legend-item">
-        <div class="pie-legend-dot" style="background:${colors[i]}"></div>
-        <span>${escHtml(label)} ${pct}%</span>
+        <div class="pie-legend-left">
+          <div class="pie-legend-dot" style="background:${item.color}"></div>
+          <span class="pie-legend-name">${escHtml(item.label)}</span>
+        </div>
+        <div class="pie-legend-right">
+          <div class="pie-legend-amount">¥${item.value.toLocaleString()}</div>
+          <div class="pie-legend-pct">${pct}%</div>
+        </div>
       </div>
     `;
   }).join('');
