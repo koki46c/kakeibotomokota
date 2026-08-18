@@ -172,6 +172,25 @@
     border-top: 1px solid #f0f0f0;
   }
 
+  /* 期間指定 */
+  .period-row { display: flex; gap: 10px; margin-bottom: 12px; }
+  .period-field { flex: 1; }
+  .period-field label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 5px; }
+  .period-field input {
+    width: 100%; padding: 10px; border: 2px solid #e8e8e8; border-radius: 8px;
+    font-size: 14px; background: white;
+  }
+  .period-field input:focus { outline: none; border-color: #667eea; }
+  .period-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .period-presets button {
+    padding: 6px 12px; font-size: 12px; border: 1px solid #e0e0e0;
+    background: #fafafa; color: #666; border-radius: 16px; cursor: pointer;
+  }
+  .period-presets button:active { background: #eee; }
+  .period-label {
+    font-size: 12px; color: #888; text-align: center; margin: 4px 0 14px;
+  }
+
   .category-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
   .category-tag {
     display: flex; align-items: center; gap: 6px; padding: 6px 12px;
@@ -335,6 +354,30 @@
       <div id="yearly-summary"></div>
       <canvas id="yearly-chart" style="display:none"></canvas>
     </div>
+
+    <!-- 期間指定集計 -->
+    <div class="card">
+      <h2>📅 期間を指定して集計</h2>
+      <div class="period-row">
+        <div class="period-field">
+          <label for="period-from">開始日</label>
+          <input type="date" id="period-from">
+        </div>
+        <div class="period-field">
+          <label for="period-to">終了日</label>
+          <input type="date" id="period-to">
+        </div>
+      </div>
+      <div class="period-presets">
+        <button onclick="setPeriodPreset('thisMonth')">今月</button>
+        <button onclick="setPeriodPreset('lastMonth')">先月</button>
+        <button onclick="setPeriodPreset('last3')">直近3ヶ月</button>
+        <button onclick="setPeriodPreset('last6')">直近6ヶ月</button>
+        <button onclick="setPeriodPreset('thisYear')">今年</button>
+      </div>
+      <button class="btn-primary" onclick="loadPeriod()">この期間で集計する</button>
+      <div id="period-summary"></div>
+    </div>
   </div>
 
   <!-- カテゴリ管理タブ -->
@@ -362,7 +405,12 @@ let selectedPayer = 'とも';
 let monthlyBarChart = null;
 let monthlyPieChart = null;
 let yearlyChart = null;
+let periodPieChart = null;
+let periodBarChart = null;
 let currentPieMode = 'all';
+let currentPeriodPieMode = 'all';
+let lastPeriodData = [];
+let lastPeriodRange = { from: '', to: '' };
 let lastMonthlyData = [];
 let lastListData = [];
 
@@ -951,6 +999,223 @@ async function loadYearly() {
   }
 }
 
+// ===== 期間指定集計 =====
+function fmtDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function initPeriodDefaults() {
+  const fromEl = document.getElementById('period-from');
+  const toEl = document.getElementById('period-to');
+  if (!fromEl.value || !toEl.value) setPeriodPreset('thisMonth');
+}
+
+function setPeriodPreset(kind) {
+  const now = new Date();
+  let from, to;
+  if (kind === 'thisMonth') {
+    from = new Date(now.getFullYear(), now.getMonth(), 1);
+    to   = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else if (kind === 'lastMonth') {
+    from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    to   = new Date(now.getFullYear(), now.getMonth(), 0);
+  } else if (kind === 'last3') {
+    from = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    to   = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else if (kind === 'last6') {
+    from = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    to   = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else {
+    from = new Date(now.getFullYear(), 0, 1);
+    to   = new Date(now.getFullYear(), 11, 31);
+  }
+  document.getElementById('period-from').value = fmtDate(from);
+  document.getElementById('period-to').value = fmtDate(to);
+}
+
+async function loadPeriod() {
+  const from = document.getElementById('period-from').value;
+  const to   = document.getElementById('period-to').value;
+  const container = document.getElementById('period-summary');
+
+  if (!from || !to) { showToast('開始日と終了日を選択してください'); return; }
+  if (from > to) { showToast('開始日が終了日より後になっています'); return; }
+
+  container.innerHTML = '<div class="loading">読み込み中...</div>';
+
+  try {
+    const { data, error } = await sb.from('expenses')
+      .select('id, date, amount, payer, category_id')
+      .gte('date', from)
+      .lte('date', to);
+
+    if (error) throw error;
+
+    lastPeriodData = data || [];
+    lastPeriodRange = { from, to };
+    currentPeriodPieMode = 'all';
+    renderPeriod();
+  } catch(e) {
+    container.innerHTML = `<div class="error-msg">エラー: ${e.message}</div>`;
+  }
+}
+
+function buildCatMaps(rows) {
+  const all = {}, tomo = {}, kota = {};
+  rows.forEach(e => {
+    const name = getCategoryName(e.category_id);
+    if (!all[name])  all[name]  = 0;
+    if (!tomo[name]) tomo[name] = 0;
+    if (!kota[name]) kota[name] = 0;
+    all[name] += e.amount;
+    if (e.payer === 'とも') tomo[name] += e.amount;
+    else                    kota[name] += e.amount;
+  });
+  return { all, tomo, kota };
+}
+
+function renderPeriod() {
+  const container = document.getElementById('period-summary');
+  const rows = lastPeriodData;
+  const { from, to } = lastPeriodRange;
+
+  const tomoTotal = rows.filter(e => e.payer === 'とも').reduce((s, e) => s + e.amount, 0);
+  const kotaTotal = rows.filter(e => e.payer === 'こた').reduce((s, e) => s + e.amount, 0);
+  const total = tomoTotal + kotaTotal;
+
+  const days = Math.round((new Date(to) - new Date(from)) / 86400000) + 1;
+  const perDay = days > 0 ? Math.round(total / days) : 0;
+
+  const maps = buildCatMaps(rows);
+
+  container.innerHTML = `
+    <div class="period-label">${from} 〜 ${to}（${days}日間・${rows.length}件／1日平均 ¥${perDay.toLocaleString()}）</div>
+    <div class="summary-grid">
+      <div class="summary-box tomo"><div class="label">とも</div><div class="amount">¥${tomoTotal.toLocaleString()}</div></div>
+      <div class="summary-box kota"><div class="label">こた</div><div class="amount">¥${kotaTotal.toLocaleString()}</div></div>
+      <div class="summary-box total"><div class="label">合計</div><div class="amount">¥${total.toLocaleString()}</div></div>
+    </div>
+
+    <div class="section-title">🥧 カテゴリ別割合</div>
+    <div class="pie-tabs">
+      <button class="pie-tab active-all" id="pperiod-tab-all"  onclick="switchPeriodPie('all')">合計</button>
+      <button class="pie-tab" id="pperiod-tab-tomo" onclick="switchPeriodPie('tomo')">とも</button>
+      <button class="pie-tab" id="pperiod-tab-kota" onclick="switchPeriodPie('kota')">こた</button>
+    </div>
+    <div class="pie-canvas-wrap">
+      <canvas id="period-pie"></canvas>
+    </div>
+    <div class="pie-legend" id="period-pie-legend"></div>
+
+    <div class="section-title">📊 カテゴリ別内訳（とも / こた）</div>
+    <canvas id="period-bar"></canvas>
+  `;
+
+  const catNames = Object.keys(maps.all).sort((a, b) => maps.all[b] - maps.all[a]);
+  if (periodBarChart) periodBarChart.destroy();
+  if (catNames.length > 0) {
+    periodBarChart = new Chart(document.getElementById('period-bar'), {
+      type: 'bar',
+      data: {
+        labels: catNames,
+        datasets: [
+          { label: 'とも', data: catNames.map(n => maps.tomo[n] || 0), backgroundColor: '#667eea' },
+          { label: 'こた', data: catNames.map(n => maps.kota[n] || 0), backgroundColor: '#f093fb' }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' } },
+        scales: {
+          x: { stacked: true },
+          y: { stacked: true, ticks: { callback: v => '¥' + v.toLocaleString() } }
+        }
+      }
+    });
+  }
+
+  drawPeriodPie(maps, 'all');
+}
+
+function switchPeriodPie(mode) {
+  currentPeriodPieMode = mode;
+  ['all','tomo','kota'].forEach(m => {
+    const btn = document.getElementById('pperiod-tab-' + m);
+    if (btn) btn.className = 'pie-tab' + (m === mode ? ' active-' + m : '');
+  });
+  drawPeriodPie(buildCatMaps(lastPeriodData), mode);
+}
+
+function drawPeriodPie(maps, mode) {
+  const map = mode === 'tomo' ? maps.tomo : mode === 'kota' ? maps.kota : maps.all;
+  const entries = Object.entries(map).filter(([, v]) => v > 0);
+
+  if (periodPieChart) periodPieChart.destroy();
+
+  const canvas = document.getElementById('period-pie');
+  const legend = document.getElementById('period-pie-legend');
+  if (!canvas || !legend) return;
+
+  if (entries.length === 0) {
+    canvas.style.display = 'none';
+    legend.innerHTML = '<span style="color:#aaa;font-size:13px;">データがありません</span>';
+    return;
+  }
+
+  canvas.style.display = 'block';
+  const labels = entries.map(([k]) => k);
+  const values = entries.map(([, v]) => v);
+  const colors = labels.map((_, i) => PIE_COLORS[i % PIE_COLORS.length]);
+  const total  = values.reduce((a, b) => a + b, 0);
+
+  periodPieChart = new Chart(canvas, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors, borderWidth: 2, borderColor: '#fff' }]
+    },
+    options: {
+      responsive: true,
+      cutout: '60%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const val = ctx.parsed;
+              const pct = ((val / total) * 100).toFixed(1);
+              return ` ¥${val.toLocaleString()} (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  const sorted = labels
+    .map((label, i) => ({ label, value: values[i], color: colors[i] }))
+    .sort((a, b) => b.value - a.value);
+
+  legend.innerHTML = sorted.map(item => {
+    const pct = ((item.value / total) * 100).toFixed(1);
+    return `
+      <div class="pie-legend-item">
+        <div class="pie-legend-left">
+          <div class="pie-legend-dot" style="background:${item.color}"></div>
+          <span class="pie-legend-name">${escHtml(item.label)}</span>
+        </div>
+        <div class="pie-legend-right">
+          <div class="pie-legend-amount">¥${item.value.toLocaleString()}</div>
+          <div class="pie-legend-pct">${pct}%</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
 // ===== タブ切り替え =====
 function switchTab(name, el) {
   document.querySelectorAll('.content').forEach(c => c.style.display = 'none');
@@ -959,7 +1224,7 @@ function switchTab(name, el) {
   el.classList.add('active');
   if (name === 'list') loadList();
   if (name === 'monthly') loadMonthly();
-  if (name === 'yearly') loadYearly();
+  if (name === 'yearly') { loadYearly(); initPeriodDefaults(); }
   if (name === 'category') reloadCategories();
 }
 
